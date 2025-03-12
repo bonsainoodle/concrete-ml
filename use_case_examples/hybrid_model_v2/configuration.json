@@ -1,0 +1,1 @@
+{"model_name": "mnist_cnn", "model_name_no_special_char": "mnist_cnn", "module_names": ["remote1", "pool1", "remote2", "pool2", "flatten", "remote3", "remote4"], "model_size": 1}
