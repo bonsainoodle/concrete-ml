@@ -18,7 +18,7 @@ import torchvision.transforms as transforms
 from torchvision import datasets
 
 from concrete.ml.torch.hybrid_model import HybridFHEMode, HybridFHEModel
-from mnist_model import MNIST_CNN_Hybrid
+from mnist_model import MNIST_CNN
 
 # Environment configuration
 os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"
@@ -38,9 +38,9 @@ if __name__ == "__main__":
         device = "cuda"
     print(f"Using device: {device}")
 
-    # Instantiate the MNIST_CNN_Hybrid model using the model_size from configuration (default to 1)
-    model_size = configuration.get("model_size", 1)
-    model = MNIST_CNN_Hybrid(model_size=model_size)
+    # Instantiate the MNIST_CNN_Hybrid model
+    model = MNIST_CNN()
+    # model.load_state_dict(torch.load("snapshots/pure.pth"))
     model.to(device)
 
     # Create the hybrid model wrapper to use the remote FHE server
@@ -64,40 +64,26 @@ if __name__ == "__main__":
     test_dataset = datasets.MNIST(root='../data', train=False, download=True, transform=transform)
     print("MNIST test dataset loaded.")
 
-    while True:
-        user_input = input("Enter sample index (0-9999, press Enter for default index 0):\n").strip()
-        if user_input == "":
-            sample_index = 0
-        else:
-            try:
-                sample_index = int(user_input)
-            except ValueError:
-                print("Invalid input. Using default index 0.")
-                sample_index = 0
+    sample_index = 0
 
-        # Retrieve sample image and its true label
-        try:
-            sample_image, true_label = test_dataset[sample_index]
-        except IndexError:
-            print("Index out of range. Using default index 0.")
-            sample_index = 0
-            sample_image, true_label = test_dataset[sample_index]
+    sample_image, true_label = test_dataset[sample_index]
 
-        # Add batch dimension and move to device
-        input_tensor = sample_image.unsqueeze(0).to(device)
+    # Add batch dimension and move to device
+    input_tensor = sample_image.unsqueeze(0).to(device)
 
-        print(f"Processing sample index {sample_index} (true label: {true_label}).")
-        print("*" * 30)
-        start_time = time.time()
-        with torch.no_grad():
-            output = model(input_tensor)
-        end_time = time.time()
-        inference_time = end_time - start_time
+    print(f"Processing sample index {sample_index} (true label: {true_label}).")
+    print("*" * 30)
 
-        # Determine the predicted digit
-        predicted_digit = output.argmax(dim=1).item()
+    start_time = time.time()
+    with torch.no_grad():
+        output = model(input_tensor)
+    end_time = time.time()
+    inference_time = end_time - start_time
 
-        print(f"Inference time: {inference_time:.4f} seconds")
-        print(f"Predicted digit: {predicted_digit}")
-        print(f"Raw model output: {output}")
-        print("*" * 30)
+    # Determine the predicted digit
+    predicted_digit = output.argmax(dim=1).item()
+
+    print(f"Inference time: {inference_time:.4f} seconds")
+    print(f"Predicted digit: {predicted_digit}")
+    print(f"Raw model output: {output}")
+    print("*" * 30)

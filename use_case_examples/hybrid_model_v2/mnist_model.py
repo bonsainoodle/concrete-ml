@@ -1,8 +1,9 @@
 import torch.nn as nn
 import torch.nn.functional as F
+from utils.func_module import FunctionWrapper
 
 
-class MNIST_CNN_Hybrid(nn.Module):
+class MNIST_CNN(nn.Module):
     """
     A hybrid MNIST CNN where all linear and pooling operations are executed
     remotely (and can be FHE-compiled), while the activation function is run
@@ -18,9 +19,9 @@ class MNIST_CNN_Hybrid(nn.Module):
       - remote4: final fully-connected layer
     """
     def __init__(self, model_size=1, activation=F.relu):
-        super(MNIST_CNN_Hybrid, self).__init__()
+        super(MNIST_CNN, self).__init__()
         assert 1 <= model_size <= 10, "model_size should be between 1 and 10"
-        self.activation = activation  # client-side activation
+        self.activation = nn.ReLU()  # client-side activation
 
         base_channels = 8
         scale = 0.25  # scaling factor for intermediate layers

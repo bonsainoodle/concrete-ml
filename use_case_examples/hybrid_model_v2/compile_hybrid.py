@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 """
-Compile and convert the MNIST_CNN_Hybrid model to FHE.
+Compile and convert the MNIST_CNN model to FHE.
 
 This script loads a sample batch from the MNIST training set, instantiates the hybrid CNN model,
 and then compiles the remote (FHE) parts using the concrete-ml HybridFHEModel converter.
@@ -29,7 +29,7 @@ from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
 
 from concrete.ml.torch.hybrid_model import HybridFHEModel
-from mnist_model import MNIST_CNN_Hybrid
+from mnist_model import MNIST_CNN
 from utils.compression import prune_model
 
 
@@ -72,9 +72,8 @@ def module_names_parser(string: str) -> List[str]:
 
 if __name__ == "__main__":
     model_name = "mnist_cnn"
-    model_size = 1
-    module_names = ["remote1", "pool1", "remote2", "pool2", "flatten", "remote3", "remote4"]
-    batch_size = 32
+    # module_names = ["remote1", "activation", "pool1", "remote2", "pool2", "flatten", "remote3", "remote4"]
+    module_names = []
     num_samples = 32
     data_root = "../data"
     models_dir = Path(__file__).parent / os.environ.get("MODELS_DIR_NAME", "compiled_models")
@@ -96,7 +95,7 @@ if __name__ == "__main__":
     sample_images = sample_images.to(device)
 
     # Instantiate the MNIST CNN hybrid model and move to CPU
-    model = MNIST_CNN_Hybrid(model_size=model_size)
+    model = MNIST_CNN()
     model.to(device)
 
     # model = prune_model(model) # comment if no pruning
@@ -106,8 +105,7 @@ if __name__ == "__main__":
     configuration = {
         "model_name": model_name,
         "model_name_no_special_char": model_name_no_special,
-        "module_names": module_names,
-        "model_size": model_size
+        "module_names": module_names
     }
     with open("configuration.json", "w") as file:
         json.dump(configuration, file)
