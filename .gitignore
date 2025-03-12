@@ -171,5 +171,10 @@ use_case_examples/hybrid_model/compiled_models/
 use_case_examples/hybrid_model/keys/
 use_case_examples/hybrid_model/user_keys/
 
+use_case_examples/hybrid_model_v2/clients/
+use_case_examples/hybrid_model_v2/compiled_models/
+use_case_examples/hybrid_model_v2/keys/
+use_case_examples/hybrid_model_v2/user_keys/
+
 # Federated learning trained model
 use_case_examples/federated_learning/model.pkl

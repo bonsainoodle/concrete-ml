@@ -1,0 +1,103 @@
+#!/usr/bin/env python
+"""
+Showcase for the hybrid model converter for MNIST_CNN_Hybrid.
+
+This script loads the configuration dumped during compilation, instantiates the MNIST_CNN_Hybrid model,
+and configures it to use a remote FHE server for its remote submodules. It then loads the MNIST test dataset
+and interactively lets you choose a sample (by index) to run inference on, printing the predicted digit,
+the raw model output, and the inference time.
+"""
+
+import json
+import os
+import time
+from pathlib import Path
+
+import torch
+import torchvision.transforms as transforms
+from torchvision import datasets
+
+from concrete.ml.torch.hybrid_model import HybridFHEMode, HybridFHEModel
+from mnist_model import MNIST_CNN_Hybrid
+
+# Environment configuration
+os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
+
+if __name__ == "__main__":
+    # Load configuration dumped during compilation
+    with open("configuration.json", "r") as file:
+        configuration = json.load(file)
+
+    module_names = configuration["module_names"]
+    model_name = configuration["model_name"]
+    model_name_no_special_char = configuration["model_name_no_special_char"]
+
+    device = "cpu"
+    if torch.cuda.is_available():
+        device = "cuda"
+    print(f"Using device: {device}")
+
+    # Instantiate the MNIST_CNN_Hybrid model using the model_size from configuration (default to 1)
+    model_size = configuration.get("model_size", 1)
+    model = MNIST_CNN_Hybrid(model_size=model_size)
+    model.to(device)
+
+    # Create the hybrid model wrapper to use the remote FHE server
+    hybrid_model = HybridFHEModel(
+        model,
+        module_names,
+        server_remote_address="http://0.0.0.0:8000",
+        model_name=model_name_no_special_char,
+        verbose=True,
+    )
+    # Initialize client connections using the "clients" folder
+    path_to_clients = Path(__file__).parent / "clients"
+    hybrid_model.init_client(path_to_clients=path_to_clients)
+    hybrid_model.set_fhe_mode(HybridFHEMode.REMOTE)
+
+    # Load MNIST test dataset for interactive inference demonstration
+    transform = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize((0.5,), (0.5,))
+    ])
+    test_dataset = datasets.MNIST(root='../data', train=False, download=True, transform=transform)
+    print("MNIST test dataset loaded.")
+
+    while True:
+        user_input = input("Enter sample index (0-9999, press Enter for default index 0):\n").strip()
+        if user_input == "":
+            sample_index = 0
+        else:
+            try:
+                sample_index = int(user_input)
+            except ValueError:
+                print("Invalid input. Using default index 0.")
+                sample_index = 0
+
+        # Retrieve sample image and its true label
+        try:
+            sample_image, true_label = test_dataset[sample_index]
+        except IndexError:
+            print("Index out of range. Using default index 0.")
+            sample_index = 0
+            sample_image, true_label = test_dataset[sample_index]
+
+        # Add batch dimension and move to device
+        input_tensor = sample_image.unsqueeze(0).to(device)
+
+        print(f"Processing sample index {sample_index} (true label: {true_label}).")
+        print("*" * 30)
+        start_time = time.time()
+        with torch.no_grad():
+            output = model(input_tensor)
+        end_time = time.time()
+        inference_time = end_time - start_time
+
+        # Determine the predicted digit
+        predicted_digit = output.argmax(dim=1).item()
+
+        print(f"Inference time: {inference_time:.4f} seconds")
+        print(f"Predicted digit: {predicted_digit}")
+        print(f"Raw model output: {output}")
+        print("*" * 30)
