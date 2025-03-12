@@ -2,7 +2,7 @@ brevitas==0.10.2
 certifi==2025.1.31
 charset-normalizer==3.4.1
 coloredlogs==15.0.1
--e git+https://github.com/bonsainoodle/concrete-ml.git@ccf449e71261ce86dbe6c4fda356344c038e43fc#egg=concrete_ml
+-e git+https://github.com/bonsainoodle/concrete-ml.git@c6b6d8158375e85b27df697220f6d1c1613088b6#egg=concrete_ml
 concrete-ml-extensions==0.1.5
 concrete-python==2.9.0
 dependencies==2.0.1
@@ -42,7 +42,7 @@ six==1.17.0
 skl2onnx==1.18.0
 skops==0.5.0
 skorch==0.11.0
-sympy==1.13.1
+sympy==1.13.3
 tabulate==0.9.0
 threadpoolctl==3.5.0
 torch==2.3.1
