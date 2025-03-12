@@ -8,6 +8,8 @@ In this case we apply a fully connected layer of a GPT-2 model in FHE.
 
 **Note:** This use case works with Python 3.9.
 
+To run this use case, ensure you have the correct versions of the required libraries. Specifically, you need `torch` version `2.3.1` and `torchvision` version `0.18.1`. To install `concrete-ml`, run `pip install -e .` in the root of this repository.
+
 0. Install additional requirements using `python -m pip install -r requirements.txt`
 1. Compile GPT-2 model using `python compile_hybrid_llm.py` script
 1. Run FHE server using `bash serve.sh`

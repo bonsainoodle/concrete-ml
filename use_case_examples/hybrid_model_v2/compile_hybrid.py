@@ -99,7 +99,7 @@ if __name__ == "__main__":
     model = MNIST_CNN_Hybrid(model_size=model_size)
     model.to(device)
 
-    model = prune_model(model) # comment if no pruning
+    # model = prune_model(model) # comment if no pruning
 
     # Save a configuration file for reference
     model_name_no_special = model_name.replace("/", "_")

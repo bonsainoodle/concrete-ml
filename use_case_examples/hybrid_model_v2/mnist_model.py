@@ -17,7 +17,7 @@ class MNIST_CNN_Hybrid(nn.Module):
       - remote3: first fully-connected layer
       - remote4: final fully-connected layer
     """
-    def __init__(self, model_size=1, activation=lambda x: x**2):
+    def __init__(self, model_size=1, activation=F.relu):
         super(MNIST_CNN_Hybrid, self).__init__()
         assert 1 <= model_size <= 10, "model_size should be between 1 and 10"
         self.activation = activation  # client-side activation
