@@ -14,7 +14,7 @@ The remote submodules (by default) are:
     - remote4: final fully-connected layer
 
 Usage example:
-    python compile_mnist.py --model-name "mnist_cnn" --model-size 2 --batch-size 32 --num-samples 32
+    python compile_mnist.py --model-name "mnist_cnn" --module-names "remote1,pool1,remote2,pool2,flatten,remote3,remote4" --snapshot "snapshots/pure.pth" --batch-size 32 --num-samples 32
 """
 
 import argparse
@@ -63,17 +63,31 @@ def compile_model(
     hybrid_model.save_and_clear_private_info(model_dir, via_mlir=via_mlir)
 
 
-def module_names_parser(string: str) -> List[str]:
-    """
-    Parse a comma-separated string of module names into a list.
-    """
-    return [elt.strip() for elt in string.split(",")]
-
-
 if __name__ == "__main__":
-    model_name = "mnist_cnn"
-    # module_names = ["remote1", "activation", "pool1", "remote2", "pool2", "flatten", "remote3", "remote4"]
-    module_names = []
+    parser = argparse.ArgumentParser(description="Compile a hybrid model.")
+    parser.add_argument("--model-name", "-m", type=str, required=True, help="Name of the model")
+    parser.add_argument(
+        "--module-names",
+        "-M",
+        type=lambda s: [] if s.strip() == "" else s.split(','),
+        required=True,
+        help="Comma-separated list of module names"
+    )
+    parser.add_argument(
+        "--snapshot",
+        "-s",
+        type=str,
+        required=True,
+        help="Path to snapshot weight file"
+    )
+    args = parser.parse_args()
+
+    model_name = args.model_name
+    module_names = args.module_names
+    snapshot_path = args.snapshot
+    print(f"Module names: {module_names}")
+    print(f"Snapshot weight file: {snapshot_path}")
+
     num_samples = 32
     data_root = "../data"
     models_dir = Path(__file__).parent / os.environ.get("MODELS_DIR_NAME", "compiled_models")
@@ -96,25 +110,15 @@ if __name__ == "__main__":
 
     # Instantiate the MNIST CNN hybrid model and move to CPU
     model = MNIST_CNN()
+    model.load_state_dict(torch.load(f"snapshots/{args.snapshot}"))
     model.to(device)
 
     # model = prune_model(model) # comment if no pruning
 
-    # Save a configuration file for reference
-    model_name_no_special = model_name.replace("/", "_")
-    configuration = {
-        "model_name": model_name,
-        "model_name_no_special_char": model_name_no_special,
-        "module_names": module_names
-    }
-    with open("configuration.json", "w") as file:
-        json.dump(configuration, file)
-    print("Saved configuration to configuration.json")
-
     # Compile the model with the provided sample input
     # Using deepcopy to avoid in-place modifications during multiple compilations
     compile_model(
-        model_name_no_special,
+        model_name,
         deepcopy(model),
         sample_images,
         module_names,
