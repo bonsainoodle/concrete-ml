@@ -5,7 +5,7 @@ certifi==2025.1.31
 charset-normalizer==3.4.1
 click==8.1.8
 coloredlogs==15.0.1
--e git+https://github.com/bonsainoodle/concrete-ml.git@f53da8a60782ca29f4ed7d30dec708ff10f02975#egg=concrete_ml
+-e ../../
 concrete-ml-extensions==0.1.5
 concrete-python==2.9.0
 contourpy==1.3.0
@@ -42,7 +42,7 @@ onnxruntime==1.18.0
 packaging==24.2
 pandas==2.0.3
 pillow==11.1.0
-protobuf==3.20.3
+protobuf==5.28.3
 psutil==7.0.0
 pydantic==2.10.6
 pydantic_core==2.27.2
