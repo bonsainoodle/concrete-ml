@@ -1,7 +1,7 @@
 """Implement the conversion of a torch model to a hybrid fhe/torch inference."""
 
-# pylint: disable=too-many-lines
 import ast
+import enum
 import io
 import sys
 import time
@@ -18,19 +18,25 @@ import torch
 from brevitas.quant_tensor import QuantTensor
 from concrete.fhe import Configuration
 from torch import nn
-from tqdm.autonotebook import tqdm
 
-from ..common.utils import MAX_BITWIDTH_BACKWARD_COMPATIBLE, HybridFHEMode
+from ..common.utils import MAX_BITWIDTH_BACKWARD_COMPATIBLE
 from ..deployment.fhe_client_server import FHEModelClient, FHEModelDev, FHEModelServer
-from ..quantization.linear_op_glwe_backend import GLWELinearLayerExecutor, has_glwe_backend
 from .compile import (
     QuantizedModule,
-    build_quantized_module,
     compile_brevitas_qat_model,
     compile_torch_model,
     has_any_qnn_layers,
 )
-from .hybrid_backprop_linear import BackwardModuleLinear, ForwardModuleLinear
+
+
+class HybridFHEMode(enum.Enum):
+    """Simple enum for different modes of execution of HybridModel."""
+
+    DISABLE = "disable"  # Use torch weights
+    REMOTE = "remote"  # Use remote FHE server
+    SIMULATE = "simulate"  # Use FHE simulation
+    CALIBRATE = "calibrate"  # Use calibration (to run before FHE compilation)
+    EXECUTE = "execute"  # Use FHE execution
 
 
 def tuple_to_underscore_str(tup: Tuple) -> str:
@@ -70,7 +76,7 @@ def convert_conv1d_to_linear(layer_or_module):
             or the Conv1D layer converted to a Linear layer.
     """
     try:
-        from transformers.modeling_utils import Conv1D  # pylint: disable=import-outside-toplevel
+        from transformers import Conv1D  # pylint: disable=import-outside-toplevel
     except ImportError:  # pragma: no cover
         return layer_or_module
 
@@ -113,12 +119,11 @@ class RemoteModule(nn.Module):
         module_name: Optional[str] = None,
         model_name: Optional[str] = None,
         verbose: int = 0,
-        optimized_linear_execution: bool = False,
     ):
         super().__init__()
         self.private_module: Optional[nn.Module] = module
         self.server_remote_address: Optional[str] = server_remote_address
-        self.calibration_data: Optional[List] = []
+        self.calibration_data: List = []
         self.uid = str(uuid.uuid4())
         self.private_q_module: Optional[QuantizedModule] = None
         self.fhe_local_mode: HybridFHEMode = HybridFHEMode.CALIBRATE
@@ -128,114 +133,109 @@ class RemoteModule(nn.Module):
         self.module_name: Optional[str] = module_name
         self.model_name: Optional[str] = model_name
         self.verbose = verbose
-        self.optimized_linear_execution = optimized_linear_execution
-        self.executor: Optional[GLWELinearLayerExecutor] = None
 
-    def init_fhe_client(
-        self, path_to_client: Optional[Path] = None, path_to_keys: Optional[Path] = None
-    ):  # pragma:no cover
-        """Set the clients keys.
-
+    def init_fhe_client(self, path_to_client: Optional[Path] = None, path_to_keys: Optional[Path] = None):
+        """Initialize client keys and upload evaluation keys in small chunks.
+        
         Args:
-            path_to_client (str): Path where the client.zip is located.
-            path_to_keys (str): Path where keys are located.
-
-        Raises:
-            ValueError: if anything goes wrong with the server.
+            path_to_client (Optional[Path]): Where client.zip files are stored.
+            path_to_keys (Optional[Path]): Where keys will be stored.
         """
-        # Handle paths
-        self.path_to_clients = path_to_client
-        if self.path_to_clients is None:
-            self.path_to_clients = Path() / "clients"
+        # Setup local directories.
+        self.path_to_clients = path_to_client or (Path() / "clients")
         self.path_to_clients.mkdir(exist_ok=True)
-        self.path_to_keys = path_to_keys
-        if self.path_to_keys is None:
-            self.path_to_keys = Path() / "keys"
+        self.path_to_keys = path_to_keys or (Path() / "keys")
         self.path_to_keys.mkdir(exist_ok=True)
+        print(f"Path to client: {self.path_to_clients}, Path to keys: {self.path_to_keys}")
 
-        # List all shapes supported by the server
-        # This is needed until we have generic shape support in Concrete Python
+        # Query the server for supported input shapes.
         assert self.module_name is not None
         shapes_response = requests.get(
             f"{self.server_remote_address}/list_shapes",
             data={"module_name": self.module_name, "model_name": self.model_name},
         )
         if shapes_response.status_code != 200:
-            # Add link to request content
-            raise ValueError(
-                f"Couldn't get shapes from server:\n{shapes_response.content.decode('utf-8')}"
-            )
-
-        # For all supported shape we need to get the FHE client from the server
+            raise ValueError(f"Couldn't get shapes from server:\n{shapes_response.content.decode('utf-8')}")
         shapes = shapes_response.json()
+        
         for shape in shapes:
+            # Download client artifact.
             client_response = requests.get(
                 f"{self.server_remote_address}/get_client",
                 data={
                     "module_name": self.module_name,
                     "model_name": self.model_name,
                     "input_shape": shape,
-                },
+                }
             )
             if client_response.status_code != 200:
-                # Add link to request content
-                raise ValueError(
-                    f"Couldn't get client from server:\n{client_response.content.decode('utf-8')}"
-                )
-            path_to_client = self.path_to_clients / tuple_to_underscore_str(ast.literal_eval(shape))
-            path_to_client.mkdir(exist_ok=True)
-            with open(path_to_client / "client.zip", "wb") as file:
+                raise ValueError(f"Couldn't get client from server:\n{client_response.content.decode('utf-8')}")
+            target_dir = self.path_to_clients / tuple_to_underscore_str(ast.literal_eval(shape))
+            target_dir.mkdir(exist_ok=True)
+            with open(target_dir / "client.zip", "wb") as file:
                 file.write(client_response.content)
-            # Create the client
-            client = FHEModelClient(
-                path_dir=str(path_to_client.resolve()), key_dir=str(self.path_to_keys.resolve())
-            )
-            # The client first need to create the private and evaluation keys.
+            
+            # Create the local FHE client.
+            client = FHEModelClient(path_dir=str(target_dir.resolve()), key_dir=str(self.path_to_keys.resolve()))
+            # Generate evaluation keys.
             serialized_evaluation_keys = client.get_serialized_evaluation_keys()
-
             if self.verbose:
                 print(f"Evaluation keys size: {len(serialized_evaluation_keys) / (10**6):.2f} MB")
-            assert isinstance(serialized_evaluation_keys, bytes)
-            assert self.module_name is not None
-            # Upload the key to the server
-            response = requests.post(
-                f"{self.server_remote_address}/add_key",
+            
+            # --- Chunk-by-chunk upload ---
+            # Define the chunk size (e.g., 1 MB).
+            chunk_size = 100 * 1024 * 1024
+            # Start upload session.
+            start_resp = requests.post(
+                f"{self.server_remote_address}/start_key_upload",
                 data={
                     "module_name": self.module_name,
                     "model_name": self.model_name,
                     "input_shape": shape,
                 },
-                files={"key": io.BytesIO(initial_bytes=serialized_evaluation_keys)},
             )
-            assert response.status_code == 200, response.content.decode("utf-8")
-            uid = response.json()["uid"]
-            # We store the key id and the client in the object
-            # If we observe memory issues due to this we can always move
-            # towards client lazy loading with caching as done on the server.
+            if start_resp.status_code != 200:
+                raise ValueError("Failed to start key upload: " + start_resp.text)
+            upload_id = start_resp.json()["upload_id"]
+            if self.verbose:
+                print(f"Started upload session: {upload_id}")
+
+            # Send the key in small chunks.
+            key_data = serialized_evaluation_keys
+            num_chunks = (len(key_data) + chunk_size - 1) // chunk_size
+            for i in range(num_chunks):
+                chunk = key_data[i * chunk_size : (i + 1) * chunk_size]
+                chunk_resp = requests.post(
+                    f"{self.server_remote_address}/upload_chunk",
+                    data={
+                        "upload_id": upload_id,
+                        "chunk_index": i,
+                    },
+                    files={"chunk": io.BytesIO(chunk)},
+                )
+                if chunk_resp.status_code != 200:
+                    raise ValueError(f"Failed to upload chunk {i}: " + chunk_resp.text)
+                if self.verbose:
+                    print(f"Uploaded chunk {i+1}/{num_chunks}")
+            
+            # Finalize the upload.
+            finish_resp = requests.post(
+                f"{self.server_remote_address}/finish_key_upload",
+                data={
+                    "upload_id": upload_id,
+                    "module_name": self.module_name,
+                    "model_name": self.model_name,
+                    "input_shape": shape,
+                },
+            )
+            if finish_resp.status_code != 200:
+                raise ValueError("Failed to finish key upload: " + finish_resp.text)
+            print("Finished the chunked key upload with status: ", finish_resp.status_code)
+            uid = finish_resp.json()["uid"]
+            # Store the key id and client in the object.
             self.clients[shape] = (uid, client)
-
-    def _apply(self, fn, recurse=True):
-        """Prevent remote modules moving private debug weights to GPU.
-
-        .. # noqa: DAR101
-        .. # noqa: DAR201
-
-        """
-        return self
-
-    def _ensure_module_on_device(self, x: torch.Tensor) -> None:
-        """Ensure the private module is on the same device as the input tensor.
-
-        Args:
-            x (torch.Tensor): The input tensor to match device with.
-        """
-        assert self.private_module is not None
-
-        # Check if any parameter is not on the same device as the input tensor
-        if any(
-            param.device != x.device for param in self.private_module.parameters()
-        ):  # pragma: no cover
-            self.private_module = self.private_module.to(x.device)  # pragma: no cover
+            if self.verbose:
+                print(f"Client information: {self.clients}, Module name: {self.module_name}, Shape: {shape}")
 
     def forward(self, x: torch.Tensor) -> Union[torch.Tensor, QuantTensor]:
         """Forward pass of the remote module.
@@ -256,52 +256,42 @@ class RemoteModule(nn.Module):
         Raises:
             ValueError: if local_fhe_mode is not supported
         """
-        # - disable: quantized module
+        # - disable: torch module
         # - remote: client-server
         # - simulate: compiled simulation
         # - calibrate: calibration
 
         if self.fhe_local_mode not in {
+            HybridFHEMode.DISABLE,
             HybridFHEMode.CALIBRATE,
             HybridFHEMode.REMOTE,
-            HybridFHEMode.TORCH,
             None,
         }:
+            # Using quantized module
             assert self.private_q_module is not None
+            y = torch.Tensor(
+                self.private_q_module.forward(x.detach().numpy(), fhe=self.fhe_local_mode.value)
+            )
 
-            if self.executor:
-                # Delegate to the optimized GLWE executor
-                y = self.executor.forward(x.detach(), self.private_q_module, self.fhe_local_mode)
-            else:
-                device = x.device
-                # Delegate to the quantized module for all fhe modes
-                y = torch.Tensor(
-                    self.private_q_module.forward(
-                        x.cpu().detach().numpy(), fhe=self.fhe_local_mode.value
-                    )
-                ).to(device)
+        elif self.fhe_local_mode == HybridFHEMode.DISABLE:
+            # Calling torch
+            assert self.private_module is not None
+            y = self.private_module.forward(
+                x.detach(),
+            )
+            assert isinstance(y, (QuantTensor, torch.Tensor))
 
         elif self.fhe_local_mode == HybridFHEMode.CALIBRATE:
             # Calling torch + gathering calibration data
             assert self.private_module is not None
-            assert self.calibration_data is not None
             self.calibration_data.append(x.detach())
-            self._ensure_module_on_device(x)
             y = self.private_module(x)
             assert isinstance(y, (QuantTensor, torch.Tensor))
 
         elif self.fhe_local_mode == HybridFHEMode.REMOTE:  # pragma:no cover
             # Remote call
-            # FIXME: https://github.com/zama-ai/concrete-ml-internal/issues/4672
-            assert self.executor is None, "Remote optimized linear layers are not yet implemented"
             y = self.remote_call(x)
 
-        elif self.fhe_local_mode == HybridFHEMode.TORCH:
-            # Using torch layers
-            assert self.private_module is not None
-            # Move private module parameters to same device as input if needed
-            self._ensure_module_on_device(x)
-            y = self.private_module(x)
         else:  # pragma:no cover
             # Shouldn't happen
             raise ValueError(f"{self.fhe_local_mode} is not recognized")
@@ -330,8 +320,13 @@ class RemoteModule(nn.Module):
             input_shape = (1,) + tuple(clear_input.shape)
             repr_input_shape = str(input_shape[1:])
             assert isinstance(clear_input, numpy.ndarray)
+            print(f"self.clients: {self.clients}")
+            print(f"repr_input_shape: {repr_input_shape}")
+            print(f"Is repr_input_shape in self.clients? {repr_input_shape in self.clients}")
             assert repr_input_shape in self.clients
             key_id, client = self.clients[repr_input_shape]
+            key_id = key_id["uid"]
+            print(key_id)
             assert client is not None
             encrypted_input = client.quantize_encrypt_serialize(clear_input)
             assert isinstance(encrypted_input, bytes)
@@ -370,7 +365,6 @@ class RemoteModule(nn.Module):
         return torch.Tensor(numpy.array(inferences)).to(device=base_device)
 
 
-# pylint: disable-next=too-many-instance-attributes
 class HybridFHEModel:
     """Convert a model to a hybrid model.
 
@@ -378,27 +372,21 @@ class HybridFHEModel:
     This will modify the model in place.
 
     Args:
-        model (nn.Module): The model to modify (in-place modification).
+        model (nn.Module): The model to modify (in-place modification)
         module_names (Union[str, List[str]]): The module name(s) to replace with FHE server.
-        server_remote_address (str): The remote address of the FHE server.
-        model_name (str): Model name identifier.
-        verbose (int): If logs should be printed when interacting with FHE server.
-
-    Raises:
-        TypeError: If the provided model is not an instance of torch.nn.Module.
+        server_remote_address): The remote address of the FHE server
+        model_name (str): Model name identifier
+        verbose (int): If logs should be printed when interacting with FHE server
     """
 
     def __init__(
         self,
         model: nn.Module,
         module_names: Union[str, List[str]],
-        server_remote_address: Optional[str] = None,
+        server_remote_address=None,
         model_name: str = "model",
         verbose: int = 0,
     ):
-        if not isinstance(model, torch.nn.Module):
-            raise TypeError("The model must be a PyTorch or Brevitas model.")
-
         self.model = model
         self.module_names = [module_names] if isinstance(module_names, str) else module_names
         self.server_remote_address = server_remote_address
@@ -406,63 +394,29 @@ class HybridFHEModel:
             name: self._get_module_by_name(self.model, name) for name in self.module_names
         }
         self.remote_modules: Dict[str, RemoteModule] = {}
-        self.private_q_modules: Dict[str, QuantizedModule] = {}
+        self.private_q_modules: dict = {}
         self.configuration: Optional[Configuration] = None
         self.model_name = model_name
         self.verbose = verbose
-        self.executor: Optional[GLWELinearLayerExecutor] = None
-
         self._replace_modules()
 
     def _replace_modules(self):
         """Replace the private modules in the model with remote layers."""
-        self._has_only_large_linear_layers = True
+
         for module_name in self.module_names:
+
             # FIXME: https://github.com/zama-ai/concrete-ml-internal/issues/3858
             # Conv1d introduce reshaping operations which adds more TLU
             self.private_modules[module_name] = convert_conv1d_to_linear(
                 self.private_modules[module_name]
             )
 
-            # Determine if this remote module is a pure linear one
-            # that is supported for compressed encrypted matmul
-            # Conv1D will have been converted to Linear by the line above
-            is_pure_linear_layer = isinstance(
-                self.private_modules[module_name],
-                (nn.Linear, ForwardModuleLinear, BackwardModuleLinear),
-            )
-
-            # Check input dimensions for linear layers
-            # If the input dimension is less than 512 we do not use the GLWE optimization.
-            # Optimal input dimension is 2048, below 512 the performance are too low.
-            if is_pure_linear_layer:
-                module = self.private_modules[module_name]
-                # Use weight shape instead of in/out_features
-                input_dim, output_dim = (
-                    (
-                        module.weight.shape[1],
-                        module.weight.shape[0],
-                    )
-                    if hasattr(module, "weight")
-                    else (0, 0)
-                )
-
-                is_pure_linear_layer = (
-                    is_pure_linear_layer and input_dim >= 512 and output_dim >= 512
-                )
-
-            if not is_pure_linear_layer:
-                self._has_only_large_linear_layers = False
-
-        for module_name in self.module_names:
-            # Create the optimized glwe linear layer executor if needed
             remote_module = RemoteModule(
                 module=self.private_modules[module_name],
                 server_remote_address=self.server_remote_address,
                 module_name=module_name,
                 model_name=self.model_name,
                 verbose=self.verbose,
-                optimized_linear_execution=(self._has_only_large_linear_layers),
             )
 
             self.remote_modules[module_name] = remote_module
@@ -474,47 +428,6 @@ class HybridFHEModel:
             )
             setattr(parent_module, last, remote_module)
 
-    def forward(self, x: torch.Tensor, fhe: str = "disable") -> torch.Tensor:
-        """Forward pass of the hybrid model.
-
-        Args:
-            x (torch.Tensor): The input tensor.
-            fhe (str): The Fully Homomorphic Encryption (FHE) mode (default is "disable").
-
-        Returns:
-            torch.Tensor: The output tensor.
-
-        Raises:
-            AssertionError: if the execution mode is not supported
-        """
-        self.set_fhe_mode(fhe)
-
-        # Validate the FHE mode
-        fhe_mode = HybridFHEMode(fhe)
-
-        if has_glwe_backend() and self._has_only_large_linear_layers:
-            if fhe_mode == HybridFHEMode.SIMULATE:
-                raise AssertionError(
-                    "When the HybridFHEModel is instantiated with only "
-                    "linear remote layers, fhe=simulate is not supported for now.",
-                )
-
-            if fhe_mode in (HybridFHEMode.EXECUTE, HybridFHEMode.REMOTE, HybridFHEMode.DISABLE):
-                # Initialize executor only if not already done
-                self.executor = self.executor or GLWELinearLayerExecutor()
-
-                # Generate keys only if needed and not already done
-                if fhe_mode != HybridFHEMode.DISABLE and self.executor.private_key is None:
-                    self.executor.keygen()
-
-        # Update executor for all remote modules
-        for module in self.remote_modules.values():
-            module.executor = self.executor
-
-        result = self.model(x)
-
-        return result
-
     def __call__(self, x: torch.Tensor, fhe: str = "disable") -> torch.Tensor:
         """Call method to run the model locally with a fhe mode.
 
@@ -525,7 +438,11 @@ class HybridFHEModel:
         Returns:
             (torch.Tensor): The output tensor.
         """
-        return self.forward(x, fhe)
+        # Set the fhe mode in each remote module
+        for module in self.remote_modules.values():
+            module.fhe_local_mode = HybridFHEMode(fhe)
+        x = self.model(x)
+        return x
 
     @staticmethod
     def _get_module_by_name(model: nn.Module, name: str) -> Union[RemoteModule, nn.Module]:
@@ -570,9 +487,7 @@ class HybridFHEModel:
         n_bits: Union[int, Dict[str, int]] = MAX_BITWIDTH_BACKWARD_COMPATIBLE,
         rounding_threshold_bits: Optional[int] = None,
         p_error: Optional[float] = None,
-        device: str = "cpu",
         configuration: Optional[Configuration] = None,
-        use_dynamic_quantization: bool = False,
     ):
         """Compiles the specific layers to FHE.
 
@@ -584,31 +499,32 @@ class HybridFHEModel:
             rounding_threshold_bits (int): The number of bits to use for rounding threshold during
                 FHE model compilation. Default is 8.
             p_error (float): Error allowed for each table look-up in the circuit.
-            device: FHE compilation device, can be either 'cpu' or 'cuda'.
             configuration (Configuration): A concrete Configuration object specifying the FHE
                 encryption parameters. If not specified, a default configuration is used.
-            use_dynamic_quantization (bool): If True, use dynamic quantization;
-                otherwise, use static quantization. (only for GLWE backend)
         """
-        assert (
-            has_glwe_backend() or not use_dynamic_quantization
-        ), "Dynamic quantization requires GLWE backend"
-
         # We do a forward pass where we accumulate inputs to use for compilation
-        self.set_fhe_mode(HybridFHEMode.CALIBRATE)
-
-        # Run the model to get the calibration data
+        for name in self.module_names:
+            # default is "calibrate"
+            self.remote_modules[name].fhe_local_mode = HybridFHEMode.CALIBRATE
         self.model(x)
 
         self.configuration = configuration
 
-        for name in tqdm(self.module_names, desc="Compiling FHE layers"):
+        for name in self.module_names:
             remote_module = self._get_module_by_name(self.model, name)
             assert isinstance(remote_module, RemoteModule)
 
-            assert remote_module.calibration_data is not None
-            calibration_data_tensor = torch.cat(remote_module.calibration_data, dim=0)
-
+            if not remote_module.calibration_data:
+                raise ValueError(f"No calibration data available for module {name}")
+            ref_shape = remote_module.calibration_data[0].shape
+            consistent_calib = [t for t in remote_module.calibration_data if t.shape == ref_shape]
+            if not consistent_calib:
+                raise ValueError(
+                    f"No calibration data with consistent shape for module {name}. Collected shapes: " +
+                    f"{[t.shape for t in remote_module.calibration_data]}"
+                )
+            calibration_data_tensor = torch.cat(consistent_calib, dim=0)
+            
             if has_any_qnn_layers(self.private_modules[name]):
                 self.private_q_modules[name] = compile_brevitas_qat_model(
                     self.private_modules[name],
@@ -617,44 +533,18 @@ class HybridFHEModel:
                     rounding_threshold_bits=rounding_threshold_bits,
                     configuration=configuration,
                     p_error=p_error,
-                    device=device,
                 )
             else:
-                # If all layers are linear and the GLWE backend is available
-                # then simply quantize the model without compiling with
-                # Concrete Python.
-                if self._has_only_large_linear_layers and has_glwe_backend():
-                    self.executor = GLWELinearLayerExecutor(
-                        use_dynamic_quantization=use_dynamic_quantization
-                    )
-                    self.private_q_modules[name] = build_quantized_module(
-                        self.private_modules[name],
-                        calibration_data_tensor,
-                        n_bits=n_bits,
-                        rounding_threshold_bits=rounding_threshold_bits,
-                        keep_onnx=False,
-                    )
-
-                    vals = self.private_q_modules[name].quant_layers_dict.values()
-                    _, q_op = next(iter(vals))
-                    const_inp = q_op.constant_inputs[1]  # Get the weights, the bias is in [2]
-
-                    if not use_dynamic_quantization:
-                        const_inp.values = const_inp.qvalues.astype(numpy.float32)
-                    const_inp.qvalues = const_inp.qvalues.astype(numpy.int16)
-                else:
-                    self.private_q_modules[name] = compile_torch_model(
-                        self.private_modules[name],
-                        calibration_data_tensor,
-                        n_bits=n_bits,
-                        rounding_threshold_bits=rounding_threshold_bits,
-                        configuration=configuration,
-                        p_error=p_error,
-                    )
+                self.private_q_modules[name] = compile_torch_model(
+                    self.private_modules[name],
+                    calibration_data_tensor,
+                    n_bits=n_bits,
+                    rounding_threshold_bits=rounding_threshold_bits,
+                    configuration=configuration,
+                    p_error=p_error,
+                )
 
             self.remote_modules[name].private_q_module = self.private_q_modules[name]
-
-            remote_module.calibration_data = None
 
     def _save_fhe_circuit(self, path: Path, via_mlir=False):
         """Private method that saves the FHE circuits.
@@ -667,27 +557,23 @@ class HybridFHEModel:
 
         model_path = Path(path)
         for module_name in self.module_names:
-            onnx_model = self.private_q_modules[module_name].onnx_model
+            input_shapes = [
+                tuple(elt.dim_value for elt in onnx_input.type.tensor_type.shape.dim)
+                for onnx_input in self.private_q_modules[  # pylint: disable=protected-access
+                    module_name
+                ]._onnx_model.graph.input
+            ]
+            assert len(input_shapes) == 1, "Multi-input circuits not supported yet"
+            model_module_path = model_path.resolve() / module_name
+            model_module_path.mkdir(exist_ok=True)
+            model_module_shape_path = model_module_path / tuple_to_underscore_str(input_shapes[0])
+            model_dev = FHEModelDev(
+                str(model_module_shape_path.resolve()),
+                self.private_q_modules[module_name],
+            )
+            model_dev.save(via_mlir=via_mlir)
 
-            if onnx_model is not None:
-                input_shapes = [
-                    tuple(elt.dim_value for elt in onnx_input.type.tensor_type.shape.dim)
-                    for onnx_input in onnx_model.graph.input
-                ]
-
-                assert len(input_shapes) == 1, "Multi-input circuits not supported yet"
-                model_module_path = model_path.resolve() / module_name
-                model_module_path.mkdir(exist_ok=True)
-                model_module_shape_path = model_module_path / tuple_to_underscore_str(
-                    input_shapes[0]
-                )
-                model_dev = FHEModelDev(
-                    str(model_module_shape_path.resolve()),
-                    self.private_q_modules[module_name],
-                )
-                model_dev.save(via_mlir=via_mlir)
-
-    def save_and_clear_private_info(self, path: Path, via_mlir=True):
+    def save_and_clear_private_info(self, path: Path, via_mlir=False):
         """Save the PyTorch model to the provided path and also saves the corresponding FHE circuit.
 
         Args:
@@ -697,34 +583,16 @@ class HybridFHEModel:
         """
         path = Path(path)
         path.mkdir(parents=True, exist_ok=True)
-
-        # Save the complete model (including private info) for the developer
-        complete_model_path = path / "complete_model.pth"
-        torch.save(self.model.state_dict(), complete_model_path.resolve())
-
-        def clear_private_info(module):
+        for name in self.module_names:
+            module = self._get_module_by_name(self.model, name)
             # Remove private information
-            for attr in [
-                "private_module",
-                "calibration_data",
-                "private_q_module",
-                "private_key",
-                "compression_key",
-            ]:
+            for attr in ["private_module", "calibration_data", "private_q_module"]:
                 if hasattr(module, attr):
                     setattr(module, attr, None)
 
-            for child in module.children():
-                clear_private_info(child)
-
-        # Clear private info for the entire model
-        clear_private_info(self.model)
-
         # Save the model with a specific filename
         model_path = path / "model.pth"
-        # Save the model state dict due to a Brevitas issue
-        # FIXME: https://github.com/zama-ai/concrete-ml-internal/issues/4572
-        torch.save(self.model.state_dict(), model_path.resolve())
+        torch.save(self.model, model_path.resolve())
 
         # Save the FHE circuit in the same directory
         self._save_fhe_circuit(path, via_mlir=via_mlir)
@@ -740,6 +608,7 @@ class HybridFHEModel:
             hybrid_fhe_mode (Union[str, HybridFHEMode]): Hybrid FHE mode to set to all
                 remote modules.
         """
+        print(self.remote_modules)
         for module in self.remote_modules.values():
             module.fhe_local_mode = HybridFHEMode(hybrid_fhe_mode)
 

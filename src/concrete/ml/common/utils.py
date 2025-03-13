@@ -10,8 +10,8 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple, Union
 import numpy
 import onnx
 import torch
-from concrete.compiler import check_gpu_available, check_gpu_enabled
 from concrete.fhe import Exactness
+from concrete.compiler import check_gpu_available, check_gpu_enabled
 from concrete.fhe.dtypes import Integer
 from sklearn.base import is_classifier, is_regressor
 
