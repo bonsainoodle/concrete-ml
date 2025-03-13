@@ -6,12 +6,8 @@ This script loads the configuration dumped during compilation, instantiates the 
 and configures it to use a remote FHE server for its remote submodules. It then loads the MNIST test dataset
 and interactively lets you choose a sample (by index) to run inference on, printing the predicted digit,
 the raw model output, and the inference time.
-
-Usage example:
-    python showcase_mnist.py --snapshot "snapshots/pure.pth"
 """
 
-import argparse
 import json
 import os
 import time
@@ -29,18 +25,6 @@ os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="Showcase for the hybrid model converter for MNIST_CNN_Hybrid."
-    )
-    parser.add_argument(
-        "--snapshot",
-        "-s",
-        type=str,
-        required=True,
-        help="Path to snapshot weight file"
-    )
-    args = parser.parse_args()
-    
     # Load configuration dumped during compilation
     with open("configuration.json", "r") as file:
         configuration = json.load(file)
@@ -56,7 +40,7 @@ if __name__ == "__main__":
 
     # Instantiate the MNIST_CNN_Hybrid model
     model = MNIST_CNN()
-    model.load_state_dict(torch.load(f"snapshots/{args.snapshot}"))
+    # model.load_state_dict(torch.load("snapshots/pure.pth"))
     model.to(device)
 
     # Create the hybrid model wrapper to use the remote FHE server
@@ -70,7 +54,7 @@ if __name__ == "__main__":
     # Initialize client connections using the "clients" folder
     path_to_clients = Path(__file__).parent / "clients"
     hybrid_model.init_client(path_to_clients=path_to_clients)
-    hybrid_model.set_fhe_mode(HybridFHEMode.REMOTE)
+    hybrid_model.set_fhe_mode(HybridFHEMode.DISABLE)
 
     # Load MNIST test dataset for interactive inference demonstration
     transform = transforms.Compose([
@@ -80,7 +64,6 @@ if __name__ == "__main__":
     test_dataset = datasets.MNIST(root='../data', train=False, download=True, transform=transform)
     print("MNIST test dataset loaded.")
 
-    # For demonstration, we use sample index 0 (this can be made interactive if needed)
     sample_index = 0
 
     sample_image, true_label = test_dataset[sample_index]

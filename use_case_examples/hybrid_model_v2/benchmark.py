@@ -3,12 +3,19 @@
 Benchmark script for MNIST model inference.
 
 Usage:
-    python benchmark.py -b <benchmark_name> -n <num_images> -m <model_name> -M <module_name1,module_module2,...> -s <snapshot_weight_path>
+    python benchmark.py -b <benchmark_name> -n <num_images> -m <model_name> -M <module_name1,module_module2,...> -s <snapshot_weight_path> -f <fhe_mode>
 
 This script runs inference on N images from the MNIST test set,
 measures inference times, computes classification metrics (accuracy,
 precision, recall, F1, and confusion matrix) and saves the results in a JSON file.
 It also saves the confusion matrix as a PNG image.
+
+The HybridFHEMode can be one of:
+    disable    # Use torch weights
+    remote     # Use remote FHE server
+    simulate   # Use FHE simulation
+    calibrate  # Use calibration (to run before FHE compilation)
+    execute    # Use FHE execution
 """
 
 import argparse
@@ -70,8 +77,11 @@ def main():
     parser.add_argument("--benchmark-name", "-b", type=str, required=True, help="Name of the benchmark")
     parser.add_argument("--num-images", "-n", type=int, required=True, help="Number of images to run inference on")
     parser.add_argument("--model-name", "-m", type=str, help="Name of the model (used for the hybrid model)", default="mnist_cnn")
-    parser.add_argument("--module-names", "-M", type=lambda s: [] if s.strip() == "" else s.split(','), required=True, help="Comma-separated list of module names")
+    parser.add_argument("--module-names", "-M", type=lambda s: [] if s.strip() == "" else s.split(','), required=True,
+                        help="Comma-separated list of module names")
     parser.add_argument("--snapshot", "-s", type=str, required=True, help="Path to snapshot weight file")
+    parser.add_argument("--fhe-mode", "-f", type=str, choices=[mode.value for mode in HybridFHEMode],
+                        default="remote", help="Hybrid FHE mode (disable, remote, simulate, calibrate, execute)")
     args = parser.parse_args()
 
     # Set device
@@ -85,7 +95,7 @@ def main():
     model.load_state_dict(torch.load(f"snapshots/{args.snapshot}"))
     model.to(device)
 
-    # Create the hybrid model wrapper to use the remote FHE server
+    # Create the hybrid model wrapper
     hybrid_model = HybridFHEModel(
         model,
         args.module_names,
@@ -96,7 +106,7 @@ def main():
     # Initialize client connections (assumes a "clients" folder in the same directory)
     path_to_clients = Path(__file__).parent / "clients"
     hybrid_model.init_client(path_to_clients=path_to_clients)
-    hybrid_model.set_fhe_mode(HybridFHEMode.REMOTE)
+    hybrid_model.set_fhe_mode(HybridFHEMode(args.fhe_mode))
 
     # Load the MNIST test dataset
     transform = transforms.Compose([

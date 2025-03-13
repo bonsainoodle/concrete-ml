@@ -6,7 +6,7 @@ import time
 import multiprocessing
 
 def run_server():
-    subprocess.run(["sh", "serve.sh"], check=True)
+    subprocess.run(["python", "serve_model.py", "--port", "8000", "--path-to-models", "./compiled_models"], check=True)
 
 def main():
     parser = argparse.ArgumentParser(
@@ -28,6 +28,10 @@ def main():
         "--snapshot", "-s", type=str, required=True,
         help="Path to snapshot weight file"
     )
+    parser.add_argument(
+        "--fhe-mode", "-f", type=str, choices=["disable", "remote", "simulate", "calibrate", "execute"],
+        default="remote", help="Hybrid FHE mode (disable, remote, simulate, calibrate, execute)"
+    )
     args = parser.parse_args()
 
     # Generate a unique model name using a random UUID.
@@ -38,9 +42,9 @@ def main():
     compile_cmd = [
         "python",
         "compile_hybrid.py",
-        "--model-name", model_name,
-        "--module-names", args.module_names,
-        "--snapshot", args.snapshot
+        "-m", model_name,
+        "-M", args.module_names,
+        "-s", args.snapshot
     ]
     print("Running compile_hybrid.py with command:")
     print(" ".join(compile_cmd))
@@ -67,7 +71,8 @@ def main():
         "-n", str(args.num_images),
         "-m", model_name,
         "-M", args.module_names,
-        "-s", args.snapshot
+        "-s", args.snapshot,
+        "-f", args.fhe_mode
     ] + module_list
     print("Running infer.py with command:")
     print(" ".join(infer_cmd))
@@ -83,6 +88,8 @@ def main():
             print("Failed to terminate server process in time.")
         else:
             print("Successfully terminated server process.")
+    else:
+        print("Successfully terminated server process.")
 
 if __name__ == "__main__":
     main()
