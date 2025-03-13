@@ -62,36 +62,35 @@ def main():
     subprocess.run(compile_cmd, check=True)
 
     # Start the server in the background.
-    print("Starting server in the background...")
+    server_process = None
+    try:
+        print("Starting server in the background...")
+        server_process = run_server()
 
-    server_process = run_server()
-    
-    # Wait a few seconds to allow the server to initialize.
-    time.sleep(5)  # Adjust the duration as needed for your environment
+        # Wait a few seconds to allow the server to initialize.
+        time.sleep(5)
 
-    # Prepare the module list for infer.py (if needed by the script).
-    module_list = [m.strip() for m in args.module_names.split(",") if m.strip()]
-
-    # Call infer.py (benchmark.py) with the generated model name and other parameters.
-    infer_cmd = [
-        "python",
-        "benchmark.py",
-        "-b", args.benchmark_name,
-        "-n", str(args.num_images),
-        "-m", model_name,
-        "-M", args.module_names,
-        "-s", args.snapshot,
-        "-f", args.fhe_mode
-    ] + module_list
-    print("Running infer.py with command:")
-    print(" ".join(infer_cmd))
-    subprocess.run(infer_cmd, check=True)
-
-    # Terminate the server process group.
-    print("Terminating server process group...")
-    os.killpg(os.getpgid(server_process.pid), signal.SIGTERM)  # Sends SIGTERM to all processes in the group.
-    server_process.wait()
-    print("Server terminated.")
+        # Call infer.py (benchmark.py) with the generated model name and other parameters.
+        # We remove the extra module list that was causing the error.
+        infer_cmd = [
+            "python",
+            "benchmark.py",
+            "-b", args.benchmark_name,
+            "-n", str(args.num_images),
+            "-m", model_name,
+            "-M", args.module_names,
+            "-s", args.snapshot,
+            "-f", args.fhe_mode
+        ]
+        print("Running infer.py with command:")
+        print(" ".join(infer_cmd))
+        subprocess.run(infer_cmd, check=True)
+    finally:
+        if server_process is not None:
+            print("Terminating server process group...")
+            os.killpg(os.getpgid(server_process.pid), signal.SIGTERM)
+            server_process.wait()
+            print("Server terminated.")
 
 if __name__ == "__main__":
     main()
