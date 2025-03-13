@@ -178,3 +178,4 @@ use_case_examples/hybrid_model_v2/user_keys/
 
 # Federated learning trained model
 use_case_examples/federated_learning/model.pkl
+benchmark/

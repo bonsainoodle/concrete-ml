@@ -1,1 +1,3 @@
-{"model_name": "gpt2", "model_name_no_special_char": "gpt2", "module_names": ["transformer.h.0.attn.c_attn"]}
+version https://git-lfs.github.com/spec/v1
+oid sha256:b1bec88888044e2ab73f2c1036478092ced9a8798df32de1a6538f5199f79b66
+size 109
