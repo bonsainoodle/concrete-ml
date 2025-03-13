@@ -573,28 +573,32 @@ class HybridFHEModel:
             )
             model_dev.save(via_mlir=via_mlir)
 
-    def save_and_clear_private_info(self, path: Path, via_mlir=False):
-        """Save the PyTorch model to the provided path and also saves the corresponding FHE circuit.
+    def save_and_clear_private_info(self, path: Path, via_mlir=False, clear_q_module: bool = True):
+        """
+        Save the PyTorch model to the provided path and also save the corresponding FHE circuit.
+        Optionally clear (remove) the compiled quantized module based on the flag clear_q_module.
 
         Args:
             path (Path): The directory where the model and the FHE circuit will be saved.
-            via_mlir (bool): if fhe circuits should be serialized using via_mlir option
-                useful for cross-platform (compile on one architecture and run on another)
+            via_mlir (bool): If the FHE circuits should be serialized using the MLIR-based method (useful for cross-platform compatibility).
+            clear_q_module (bool): If set to True, the private_q_module is cleared. When simulation is desired,
+                                set this flag to False so that the compiled quantized module is retained.
         """
         path = Path(path)
         path.mkdir(parents=True, exist_ok=True)
         for name in self.module_names:
             module = self._get_module_by_name(self.model, name)
-            # Remove private information
-            for attr in ["private_module", "calibration_data", "private_q_module"]:
+            # Remove sensitive information that is not needed after compilation.
+            for attr in ["private_module", "calibration_data"]:
                 if hasattr(module, attr):
                     setattr(module, attr, None)
-
-        # Save the model with a specific filename
+            # Optionally clear the compiled quantized module.
+            if clear_q_module and hasattr(module, "private_q_module"):
+                setattr(module, "private_q_module", None)
+        # Save the model state dict.
         model_path = path / "model.pth"
-        torch.save(self.model, model_path.resolve())
-
-        # Save the FHE circuit in the same directory
+        torch.save(self.model.state_dict(), model_path)
+        # Also save the FHE circuits.
         self._save_fhe_circuit(path, via_mlir=via_mlir)
 
     def publish_to_hub(self):

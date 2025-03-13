@@ -55,7 +55,8 @@ def main():
         "compile_hybrid.py",
         "-m", model_name,
         "-M", args.module_names,
-        "-s", args.snapshot
+        "-s", args.snapshot,
+        "-f", args.fhe_mode
     ]
     print("Running compile_hybrid.py with command:")
     print(" ".join(compile_cmd))

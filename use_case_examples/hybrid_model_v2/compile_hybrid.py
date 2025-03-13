@@ -60,7 +60,9 @@ def compile_model(
     model_dir = models_dir / model_name
     print(f"Saving compiled model to {model_dir}")
     via_mlir = bool(int(os.environ.get("VIA_MLIR", 1)))
-    hybrid_model.save_and_clear_private_info(model_dir, via_mlir=via_mlir)
+    clear_q = not args.fhe_mode == "simulate"
+    print(f"Clearing quantization module: {clear_q}")
+    hybrid_model.save_and_clear_private_info(model_dir, via_mlir=via_mlir, clear_q_module=clear_q)
 
 
 if __name__ == "__main__":
@@ -80,6 +82,12 @@ if __name__ == "__main__":
         required=True,
         help="Path to snapshot weight file"
     )
+    
+    parser.add_argument(
+        "--fhe-mode", "-f", type=str, choices=["disable", "remote", "simulate", "calibrate", "execute"],
+        required=True, help="Hybrid FHE mode (disable, remote, simulate, calibrate, execute)"
+    )
+    
     args = parser.parse_args()
 
     model_name = args.model_name
