@@ -1,12 +1,23 @@
 #!/usr/bin/env python
 import argparse
+import os
+import signal
 import subprocess
 import uuid
 import time
-import multiprocessing
 
 def run_server():
-    subprocess.run(["python", "serve_model.py", "--port", "8000", "--path-to-models", "./compiled_models"], check=True)
+    # Open the log file for writing.
+    log_file = open("server.log", "w")
+
+    # Launch the server with preexec_fn=os.setsid which creates a new process group.
+    process = subprocess.Popen(
+        ["python", "serve_model.py", "--port", "8000", "--path-to-models", "./compiled_models"],
+        stdout=log_file,
+        stderr=log_file,
+        preexec_fn=os.setsid  # This ensures the subprocess becomes the leader of a new process group.
+    )
+    return process
 
 def main():
     parser = argparse.ArgumentParser(
@@ -50,12 +61,10 @@ def main():
     print(" ".join(compile_cmd))
     subprocess.run(compile_cmd, check=True)
 
-    # Start the server in the background using ./serve.sh.
-    print("Starting server with ./serve.sh in the background...")
+    # Start the server in the background.
+    print("Starting server in the background...")
 
-    # Use multiprocessing to start the server process instead of threading.
-    server_process = multiprocessing.Process(target=run_server)
-    server_process.start()
+    server_process = run_server()
     
     # Wait a few seconds to allow the server to initialize.
     time.sleep(5)  # Adjust the duration as needed for your environment
@@ -78,18 +87,11 @@ def main():
     print(" ".join(infer_cmd))
     subprocess.run(infer_cmd, check=True)
 
-    # Ensure the server process is properly terminated after the benchmark is complete.
-    server_process.join(timeout=3)
-    if server_process.is_alive():
-        print("Server process did not terminate in time, attempting to kill it.")
-        server_process.terminate()
-        server_process.join(timeout=5)
-        if server_process.is_alive():
-            print("Failed to terminate server process in time.")
-        else:
-            print("Successfully terminated server process.")
-    else:
-        print("Successfully terminated server process.")
+    # Terminate the server process group.
+    print("Terminating server process group...")
+    os.killpg(os.getpgid(server_process.pid), signal.SIGTERM)  # Sends SIGTERM to all processes in the group.
+    server_process.wait()
+    print("Server terminated.")
 
 if __name__ == "__main__":
     main()
